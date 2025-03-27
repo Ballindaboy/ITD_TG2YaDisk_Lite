@@ -1,0 +1,7 @@
+python-telegram-bot==22.0
+python-dotenv==1.0.0
+yadisk==1.2.16
+nest-asyncio==1.5.8
+pydub==0.25.1
+SpeechRecognition==3.14.1
+pytz==2024.1 
