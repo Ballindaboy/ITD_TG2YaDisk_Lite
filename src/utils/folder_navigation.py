@@ -143,7 +143,7 @@ class FolderNavigator:
         keyboard = []
         
         # Ограничиваем количество папок для отображения
-        max_folders = 30
+        max_folders = 200
         display_folders = folders[:max_folders]
         
         # Добавляем папки в клавиатуру (по 2 в строке для компактности)
