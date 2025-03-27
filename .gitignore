@@ -130,6 +130,8 @@ dmypy.json
 cython_debug/
 
 # Папки для логов и временных файлов
-logs/
-upload_temp/
+logs/*
+!logs/.gitkeep
+upload_temp/*
+!upload_temp/.gitkeep
 bot.log 
