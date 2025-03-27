@@ -322,8 +322,10 @@ async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         # Обновляем файл на Яндекс.Диске
         footer = "\n\n=== Завершение встречи ===\n"
-        footer += f"Продолжительность: {summary.split('Продолжительность: ')[1].split('\n')[0]}\n"
-        footer += f"Количество записей: {summary.split('Количество записей: ')[1].split('\n')[0]}\n"
+        duration = summary.split('Продолжительность: ')[1].split('\n')[0]
+        footer += f"Продолжительность: {duration}\n"
+        records_count = summary.split('Количество записей: ')[1].split('\n')[0]
+        footer += f"Количество записей: {records_count}\n"
         
         # Добавляем только завершающую информацию
         await yadisk_helper.append_to_text_file_async(footer, session.txt_file_path)
