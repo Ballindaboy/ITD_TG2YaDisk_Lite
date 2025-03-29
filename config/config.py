@@ -32,7 +32,11 @@ def get_current_timestamp():
 # Функция для проверки прав администратора
 def is_admin(user_id):
     """Проверяет, является ли пользователь администратором"""
-    return user_id in ADMIN_IDS
+    logging.info(f"Проверка прав администратора для пользователя {user_id}")
+    logging.info(f"Список администраторов: {ADMIN_IDS}")
+    result = user_id in ADMIN_IDS
+    logging.info(f"Результат проверки: {result}")
+    return result
 
 # Проверка обязательных переменных окружения
 def validate_config():
