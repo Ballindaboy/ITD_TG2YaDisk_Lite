@@ -169,6 +169,8 @@ async def create_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> s
     folder_name = update.message.text.strip()
     current_path = context.user_data.get("folder_to_create_path", "/")
     
+    logger.info(f"Создание папки: '{folder_name}' в пути: '{current_path}'")
+    
     if "/" in folder_name or "\\" in folder_name:
         await update.message.reply_text(
             "Название папки не должно содержать символы / или \\. Пожалуйста, введите другое название:"
@@ -176,29 +178,45 @@ async def create_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> s
         return CREATE_FOLDER
     
     # Создаем полный путь новой папки
-    new_folder_path = folder_navigator.join_paths(current_path, folder_name)
+    new_folder_path = folder_navigator.safe_join_path(current_path, folder_name)
+    logger.info(f"Полный путь новой папки: '{new_folder_path}'")
     
     # Проверяем, находится ли путь в пределах разрешенных папок
-    if not folder_navigator.is_path_allowed(new_folder_path):
+    is_allowed = folder_navigator.is_path_allowed(new_folder_path)
+    logger.info(f"Путь разрешен: {is_allowed}")
+    
+    if not is_allowed:
         await update.message.reply_text(
             "Нельзя создать папку в этом месте. Пожалуйста, выберите другую папку для создания."
         )
         # Возвращаемся к выбору папки
-        await folder_navigator.show_folders(update, context)
+        await folder_navigator.show_folders(update, context, current_path)
         return CHOOSE_FOLDER
     
     try:
+        # Проверяем существование родительского пути
+        parent_exists = await folder_navigator.yadisk_helper.ensure_directory_exists_async(current_path)
+        logger.info(f"Родительский путь '{current_path}' существует: {parent_exists}")
+        
         # Создаем папку асинхронно
-        await yadisk_helper.create_dir_async(new_folder_path)
+        logger.info(f"Создание папки на Яндекс.Диске: '{new_folder_path}'")
+        success = await folder_navigator.yadisk_helper.create_dir_async(new_folder_path)
         
-        await update.message.reply_text(f"Папка '{folder_name}' успешно создана!")
-        
-        # Продолжаем навигацию, показывая содержимое текущей папки
-        await folder_navigator.show_folders(update, context, current_path)
-        return CHOOSE_FOLDER
+        if success:
+            await update.message.reply_text(f"Папка '{folder_name}' успешно создана!")
+            
+            # Обновляем кэш папок
+            if current_path in folder_navigator.folder_cache:
+                del folder_navigator.folder_cache[current_path]
+                
+            # Продолжаем навигацию, показывая содержимое текущей папки
+            await folder_navigator.show_folders(update, context, current_path)
+            return CHOOSE_FOLDER
+        else:
+            raise Exception("Не удалось создать папку на Яндекс.Диске")
         
     except Exception as e:
-        logger.error(f"Ошибка при создании папки: {e}", exc_info=True)
+        logger.error(f"Ошибка при создании папки '{new_folder_path}': {e}", exc_info=True)
         await update.message.reply_text(
             f"Не удалось создать папку: {str(e)}. Пожалуйста, попробуйте еще раз или используйте /cancel."
         )

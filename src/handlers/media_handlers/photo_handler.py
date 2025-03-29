@@ -47,7 +47,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, yadis
         
         # Формируем путь на Яндекс.Диске, используя безопасное соединение путей
         yadisk_filename = f"{session.file_prefix}_{safe_file_id}.jpg"
-        yadisk_path = FolderNavigator.safe_join_path(session.folder_path, yadisk_filename)
+        yadisk_path = FolderNavigator.safe_join_path_static(session.folder_path, yadisk_filename)
         
         # Загружаем на Яндекс.Диск асинхронно
         await yadisk_helper.upload_file_async(file_path, yadisk_path)

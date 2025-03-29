@@ -522,10 +522,22 @@ class FolderNavigator:
         
         return filename
         
-    @staticmethod
-    def safe_join_path(*parts: str) -> str:
+    def safe_join_path(self, *parts: str) -> str:
         """
         Безопасно объединяет части пути, избегая проблем с двойными слешами
+        
+        Args:
+            *parts: Части пути для объединения
+            
+        Returns:
+            Объединенный путь
+        """
+        return self.__class__.safe_join_path_static(*parts)
+        
+    @staticmethod
+    def safe_join_path_static(*parts: str) -> str:
+        """
+        Статический метод для безопасного объединения частей пути
         
         Args:
             *parts: Части пути для объединения
@@ -542,7 +554,7 @@ class FolderNavigator:
         # Собираем путь
         result = ""
         for part in filtered_parts:
-            part = part.strip().strip('/')  # Убираем начальные и конечные слеши
+            part = str(part).strip().strip('/')  # Убираем начальные и конечные слеши
             if part:
                 result = result.rstrip('/') + '/' + part
                 

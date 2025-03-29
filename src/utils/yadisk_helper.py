@@ -72,9 +72,16 @@ class YaDiskHelper:
     
     async def ensure_directory_exists_async(self, directory_path):
         """Асинхронно проверяет существование директории и создает её при необходимости"""
-        loop = asyncio.get_event_loop()
-        ensure_dir_func = partial(self._ensure_directory_exists, directory_path)
-        return await loop.run_in_executor(None, ensure_dir_func)
+        logger.info(f"Проверка существования директории: {directory_path}")
+        try:
+            loop = asyncio.get_event_loop()
+            ensure_dir_func = partial(self._ensure_directory_exists, directory_path)
+            result = await loop.run_in_executor(None, ensure_dir_func)
+            logger.info(f"Директория {directory_path} проверена и при необходимости создана")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при проверке/создании директории {directory_path}: {e}", exc_info=True)
+            return False
     
     def create_text_file(self, text, remote_path, retry_count=3, retry_delay=2):
         """Создает текстовый файл на Яндекс.Диске"""
@@ -165,14 +172,28 @@ class YaDiskHelper:
     def create_dir(self, path):
         """Создает директорию на Яндекс.Диске"""
         try:
-            self._ensure_directory_exists(path)
-            return True
+            logger.info(f"Создание директории: {path}")
+            # Проверяем, существует ли директория
+            try:
+                meta = self.disk.get_meta(path)
+                logger.info(f"Директория {path} уже существует")
+                return True
+            except yadisk.exceptions.PathNotFoundError:
+                # Если директория не существует, убеждаемся, что родительские директории существуют
+                self._ensure_directory_exists(os.path.dirname(path))
+                # Создаем директорию
+                self.disk.mkdir(path)
+                logger.info(f"Директория {path} успешно создана")
+                return True
         except Exception as e:
             logger.error(f"Ошибка при создании директории {path}: {e}", exc_info=True)
             return False
     
     async def create_dir_async(self, path):
         """Асинхронно создает директорию на Яндекс.Диске"""
+        logger.info(f"Асинхронное создание директории: {path}")
         loop = asyncio.get_event_loop()
         create_dir_func = partial(self.create_dir, path)
-        return await loop.run_in_executor(None, create_dir_func) 
+        result = await loop.run_in_executor(None, create_dir_func)
+        logger.info(f"Результат создания директории {path}: {result}")
+        return result 
