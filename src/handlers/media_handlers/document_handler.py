@@ -6,6 +6,7 @@ from telegram.ext import ContextTypes
 from config.config import UPLOAD_DIR
 from src.utils.session_utils import state_manager
 from src.utils.message_utils import send_temp_message, send_processing_message, update_processing_message
+from src.utils.folder_navigation import FolderNavigator
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE, ya
         # Создаем временный путь для сохранения
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         
-        # Сохраняем оригинальное имя файла, но добавляем уникальный идентификатор
+        # Сохраняем оригинальное имя файла, но очищаем его от недопустимых символов
         original_filename = document.file_name or f"document_{document_file.file_unique_id}"
-        file_path = os.path.join(UPLOAD_DIR, f"{session.timestamp}_{original_filename}")
+        safe_filename = FolderNavigator.sanitize_filename(original_filename)
+        
+        # Создаем локальный путь для файла
+        local_filename = f"{session.timestamp}_{safe_filename}"
+        file_path = os.path.join(UPLOAD_DIR, local_filename)
         
         # Загружаем документ
         await document_file.download_to_drive(file_path)
@@ -44,8 +49,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE, ya
         # Обновляем сообщение о прогрессе
         progress_message = await update_processing_message(progress_message, "⏳ Загрузка на Яндекс.Диск...")
         
-        # Формируем путь на Яндекс.Диске
-        yadisk_path = f"{session.folder_path}/{session.file_prefix}_{original_filename}"
+        # Формируем путь на Яндекс.Диске, используя безопасное соединение путей
+        yadisk_filename = f"{session.file_prefix}_{safe_filename}"
+        yadisk_path = FolderNavigator.safe_join_path(session.folder_path, yadisk_filename)
         
         # Загружаем на Яндекс.Диск асинхронно
         await yadisk_helper.upload_file_async(file_path, yadisk_path)
@@ -61,7 +67,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE, ya
         await progress_message.delete()
         
         # Отвечаем пользователю
-        await update.message.reply_text(f"📄 Документ '{original_filename}' успешно сохранен!")
+        await update.message.reply_text("📄 Документ успешно сохранен!")
         
         # Отправляем временное сообщение
         await send_temp_message(update, "📝 Сообщение о документе добавлено в протокол", 3)

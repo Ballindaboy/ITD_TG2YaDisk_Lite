@@ -694,44 +694,14 @@ async def show_allowed_folders(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def add_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     """
-    Добавляет папку в список разрешенных
+    Добавляет папку в список разрешенных с проверкой существования
     """
     folder_path = update.message.text.strip()
     
-    # Проверяем формат пути
-    if not folder_path.startswith('/'):
-        folder_path = '/' + folder_path
+    # Используем новый асинхронный метод для добавления папки
+    success, message = await folder_navigator.add_allowed_folder(folder_path)
     
-    try:
-        # Загружаем текущий список разрешенных папок
-        with open(FOLDERS_FILE, 'r', encoding='utf-8') as f:
-            folders = json.load(f)
-        
-        # Проверяем, не добавлена ли уже эта папка
-        if folder_path in folders:
-            await update.message.reply_text(
-                f"Папка '{folder_path}' уже есть в списке разрешенных."
-            )
-        else:
-            # Добавляем новую папку
-            folders.append(folder_path)
-            
-            # Сохраняем обновленный список
-            with open(FOLDERS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(folders, f, indent=4)
-                
-            # Перезагружаем список в навигаторе папок
-            folder_navigator.reload_allowed_folders()
-            
-            await update.message.reply_text(
-                f"Папка '{folder_path}' успешно добавлена в список разрешенных.\n"
-                f"Текущее количество разрешенных папок: {len(folders)}"
-            )
-    except Exception as e:
-        logger.error(f"Ошибка при добавлении папки: {e}", exc_info=True)
-        await update.message.reply_text(
-            f"Произошла ошибка при добавлении папки: {str(e)}"
-        )
+    await update.message.reply_text(message)
     
     # Возвращаемся в административное меню
     return await admin_command(update, context)
@@ -742,40 +712,10 @@ async def remove_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> s
     """
     folder_path = update.message.text.strip()
     
-    # Проверяем формат пути
-    if not folder_path.startswith('/'):
-        folder_path = '/' + folder_path
+    # Используем новый асинхронный метод для удаления папки
+    success, message = await folder_navigator.remove_allowed_folder(folder_path)
     
-    try:
-        # Загружаем текущий список разрешенных папок
-        with open(FOLDERS_FILE, 'r', encoding='utf-8') as f:
-            folders = json.load(f)
-        
-        # Проверяем, есть ли папка в списке
-        if folder_path not in folders:
-            await update.message.reply_text(
-                f"Папка '{folder_path}' не найдена в списке разрешенных."
-            )
-        else:
-            # Удаляем папку из списка
-            folders.remove(folder_path)
-            
-            # Сохраняем обновленный список
-            with open(FOLDERS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(folders, f, indent=4)
-                
-            # Перезагружаем список в навигаторе папок
-            folder_navigator.reload_allowed_folders()
-            
-            await update.message.reply_text(
-                f"Папка '{folder_path}' успешно удалена из списка разрешенных.\n"
-                f"Текущее количество разрешенных папок: {len(folders)}"
-            )
-    except Exception as e:
-        logger.error(f"Ошибка при удалении папки: {e}", exc_info=True)
-        await update.message.reply_text(
-            f"Произошла ошибка при удалении папки: {str(e)}"
-        )
+    await update.message.reply_text(message)
     
     # Возвращаемся в административное меню
     return await admin_command(update, context) 

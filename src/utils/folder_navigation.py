@@ -6,6 +6,8 @@ from typing import List, Dict, Any, Tuple, Optional, Callable
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ContextTypes
 from config.config import FOLDERS_FILE
+import yadisk
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +47,21 @@ class FolderNavigator:
     @staticmethod
     def normalize_path(path: str) -> str:
         """Нормализует путь для Яндекс.Диска"""
-        # Удаляем префикс диска, который может быть добавлен API Яндекс.Диска
-        path = path.replace("disk:", "")
+        if not path:
+            return "/"
+            
+        # Удаляем префикс диска и очищаем от лишних пробелов
+        path = path.replace("disk:", "").strip()
         
-        # И принимает пути как с начальными и конечными слешами, так и без них
-        # Для единообразия мы приводим все пути к формату с начальным '/'
-        # и без конечного '/' (кроме корневого пути)
+        # Преобразуем последовательные слеши в один слеш
+        while '//' in path:
+            path = path.replace('//', '/')
+        
+        # Добавляем начальный слеш, если его нет
         if not path.startswith("/"):
             path = "/" + path
             
+        # Удаляем конечный слеш (кроме корневого пути)
         if path != "/" and path.endswith("/"):
             path = path.rstrip("/")
             
@@ -83,11 +91,8 @@ class FolderNavigator:
     
     def join_paths(self, parent_path: str, folder_name: str) -> str:
         """Соединяет родительский путь и имя папки в полный путь"""
-        parent_path = self.normalize_path(parent_path)
-        
-        if parent_path == "/":
-            return f"/{folder_name}"
-        return f"{parent_path}/{folder_name}"
+        # Используем более надежный метод для объединения путей
+        return self.safe_join_path(parent_path, folder_name)
     
     async def get_folders(self, path: str, retry_count: int = 2, retry_delay: float = 1.0) -> List[Any]:
         """Получает список папок по указанному пути, с использованием кэша"""
@@ -117,21 +122,54 @@ class FolderNavigator:
         # Возвращаем пустой список, если все попытки не удались
         return []
     
-    async def cache_allowed_folders(self) -> None:
-        """Кэширует структуру разрешенных папок"""
+    async def cache_allowed_folders(self, force_refresh=False) -> Dict[str, Any]:
+        """
+        Кэширует структуру разрешенных папок с улучшенным логированием
+        
+        Args:
+            force_refresh: Принудительное обновление кэша
+            
+        Returns:
+            Словарь со статистикой кэширования
+        """
         if not self.allowed_folders:
             logger.warning("Нет разрешенных папок для кэширования")
-            return
+            return {"status": "warning", "message": "Нет разрешенных папок", "success": 0, "failed": 0}
         
-        logger.info("Начало кэширования разрешенных папок...")
+        logger.info(f"Начало кэширования {len(self.allowed_folders)} разрешенных папок...")
+        
+        # Если требуется принудительное обновление, очищаем кэш
+        if force_refresh:
+            await self.clear_cache()
+        
+        successful_cache = 0
+        failed_cache = 0
+        
         for allowed_folder in self.allowed_folders:
             try:
                 logger.info(f"Кэширование папки: {allowed_folder}")
-                await self.get_folders(allowed_folder)
+                folders = await self.get_folders(allowed_folder)
+                
+                # Добавляем в статистику
+                if folders is not None:
+                    successful_cache += 1
+                    logger.debug(f"Успешно кэшировано {len(folders)} подпапок для {allowed_folder}")
+                else:
+                    failed_cache += 1
             except Exception as e:
+                failed_cache += 1
                 logger.error(f"Ошибка при кэшировании папки {allowed_folder}: {str(e)}", exc_info=True)
         
-        logger.info("Кэширование папок завершено")
+        result = {
+            "status": "success",
+            "message": f"Кэширование папок завершено. Успешно: {successful_cache}, с ошибками: {failed_cache}",
+            "success": successful_cache,
+            "failed": failed_cache,
+            "total": len(self.allowed_folders)
+        }
+        
+        logger.info(result["message"])
+        return result
     
     async def clear_cache(self) -> None:
         """Очищает кэш папок"""
@@ -299,4 +337,221 @@ class FolderNavigator:
             self.allowed_folders = self._load_allowed_folders()
             logger.info(f"Список разрешенных папок перезагружен. Загружено {len(self.allowed_folders)} папок")
         except Exception as e:
-            logger.error(f"Ошибка при перезагрузке разрешенных папок: {e}", exc_info=True) 
+            logger.error(f"Ошибка при перезагрузке разрешенных папок: {e}", exc_info=True)
+    
+    def validate_folder_name(self, folder_name: str) -> Tuple[bool, str]:
+        """Проверяет допустимость имени папки для Яндекс.Диска
+        
+        Возвращает: (валидно, сообщение об ошибке)
+        """
+        # Недопустимые символы в именах файлов/папок на Яндекс.Диске
+        invalid_chars = ['\\', ':', '*', '?', '"', '<', '>', '|']
+        
+        # Проверка на пустое имя
+        if not folder_name.strip():
+            return False, "Имя папки не может быть пустым"
+        
+        # Проверка на недопустимые символы
+        for char in invalid_chars:
+            if char in folder_name:
+                return False, f"Имя папки содержит недопустимый символ: '{char}'"
+        
+        # Проверка на слишком длинное имя
+        if len(folder_name) > 255:
+            return False, "Имя папки слишком длинное (более 255 символов)"
+        
+        return True, ""
+    
+    async def validate_folder_path(self, path: str) -> Tuple[bool, str, bool]:
+        """Проверяет существование и доступность пути на Яндекс.Диске
+        
+        Возвращает кортеж: (валидность, сообщение об ошибке, существует ли путь)
+        """
+        normalized_path = self.normalize_path(path)
+        
+        # Проверка длины пути
+        if len(normalized_path) > 255:
+            return False, "Путь слишком длинный (более 255 символов)", False
+        
+        # Проверка допустимости каждой части пути
+        parts = normalized_path.split("/")
+        for part in parts:
+            if part:  # Пропускаем пустые части (например, между двумя слешами)
+                valid, message = self.validate_folder_name(part)
+                if not valid:
+                    return False, f"Недопустимая часть пути '{part}': {message}", False
+        
+        # Проверка существования папки на Яндекс.Диске
+        try:
+            # Корневой путь всегда существует
+            if normalized_path == "/":
+                return True, "", True
+            
+            # Проверяем существование через API
+            try:
+                await self.yadisk_helper.disk.get_meta_async(normalized_path)
+                return True, "", True
+            except AttributeError:
+                # Если нет асинхронного метода, используем неасинхронный через executor
+                try:
+                    loop = asyncio.get_event_loop()
+                    get_meta_func = partial(self.yadisk_helper.disk.get_meta, normalized_path)
+                    await loop.run_in_executor(None, get_meta_func)
+                    return True, "", True
+                except yadisk.exceptions.PathNotFoundError:
+                    return True, "", False
+        except yadisk.exceptions.PathNotFoundError:
+            return True, "", False
+        except Exception as e:
+            logger.error(f"Ошибка при проверке пути {normalized_path}: {e}", exc_info=True)
+            return False, f"Ошибка при проверке пути: {str(e)}", False 
+    
+    async def add_allowed_folder(self, folder_path: str) -> Tuple[bool, str]:
+        """
+        Добавляет папку в список разрешенных с проверкой существования
+        
+        Возвращает: (успех операции, сообщение)
+        """
+        # Нормализуем путь
+        normalized_path = self.normalize_path(folder_path)
+        
+        # Проверяем валидность и существование папки
+        is_valid, error_msg, exists = await self.validate_folder_path(normalized_path)
+        
+        if not is_valid:
+            return False, error_msg
+        
+        if not exists:
+            return False, f"Папка '{normalized_path}' не существует на Яндекс.Диске"
+        
+        # Проверяем, не добавлена ли уже эта папка
+        if normalized_path in self.allowed_folders:
+            return False, f"Папка '{normalized_path}' уже добавлена в список разрешенных"
+        
+        try:
+            # Загружаем текущий список папок
+            with open(FOLDERS_FILE, 'r', encoding='utf-8') as f:
+                folders = json.load(f)
+            
+            # Добавляем новую папку
+            folders.append(normalized_path)
+            
+            # Сохраняем обновленный список
+            with open(FOLDERS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(folders, f, indent=4, ensure_ascii=False)
+            
+            # Обновляем список в памяти
+            self.allowed_folders = [self.normalize_path(folder) for folder in folders]
+            
+            # Кэшируем новую папку
+            try:
+                await self.get_folders(normalized_path)
+            except Exception as e:
+                logger.warning(f"Не удалось кэшировать новую папку {normalized_path}: {e}")
+            
+            return True, f"Папка '{normalized_path}' успешно добавлена в список разрешенных"
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении папки {normalized_path}: {e}", exc_info=True)
+            return False, f"Ошибка при добавлении папки: {str(e)}"
+    
+    async def remove_allowed_folder(self, folder_path: str) -> Tuple[bool, str]:
+        """
+        Удаляет папку из списка разрешенных
+        
+        Возвращает: (успех операции, сообщение)
+        """
+        # Нормализуем путь
+        normalized_path = self.normalize_path(folder_path)
+        
+        # Проверяем, есть ли папка в списке
+        if normalized_path not in self.allowed_folders:
+            return False, f"Папка '{normalized_path}' не найдена в списке разрешенных"
+        
+        try:
+            # Загружаем текущий список папок
+            with open(FOLDERS_FILE, 'r', encoding='utf-8') as f:
+                folders = json.load(f)
+            
+            # Удаляем папку из списка (нужно учесть разные форматы пути)
+            for i, folder in enumerate(folders):
+                if self.normalize_path(folder) == normalized_path:
+                    removed_folder = folders.pop(i)
+                    break
+            
+            # Сохраняем обновленный список
+            with open(FOLDERS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(folders, f, indent=4, ensure_ascii=False)
+            
+            # Обновляем список в памяти
+            self.allowed_folders = [self.normalize_path(folder) for folder in folders]
+            
+            # Очищаем кэш для этой папки
+            if normalized_path in self.folder_cache:
+                del self.folder_cache[normalized_path]
+            
+            return True, f"Папка '{normalized_path}' успешно удалена из списка разрешенных"
+        except Exception as e:
+            logger.error(f"Ошибка при удалении папки {normalized_path}: {e}", exc_info=True)
+            return False, f"Ошибка при удалении папки: {str(e)}"
+    
+    @staticmethod
+    def sanitize_filename(filename: str) -> str:
+        """
+        Очищает имя файла от недопустимых символов
+        
+        Args:
+            filename: Исходное имя файла
+            
+        Returns:
+            Очищенное имя файла
+        """
+        if not filename:
+            return "unnamed_file"
+            
+        # Недопустимые символы в именах файлов на Яндекс.Диске
+        invalid_chars = ['\\', ':', '*', '?', '"', '<', '>', '|', '/']
+        
+        # Заменяем недопустимые символы на нижнее подчеркивание
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        
+        # Ограничиваем длину имени файла
+        if len(filename) > 100:
+            name, ext = os.path.splitext(filename)
+            filename = name[:100 - len(ext)] + ext
+        
+        return filename
+        
+    @staticmethod
+    def safe_join_path(*parts: str) -> str:
+        """
+        Безопасно объединяет части пути, избегая проблем с двойными слешами
+        
+        Args:
+            *parts: Части пути для объединения
+            
+        Returns:
+            Объединенный путь
+        """
+        # Убираем пустые части пути
+        filtered_parts = [p for p in parts if p]
+        
+        if not filtered_parts:
+            return "/"
+        
+        # Собираем путь
+        result = ""
+        for part in filtered_parts:
+            part = part.strip().strip('/')  # Убираем начальные и конечные слеши
+            if part:
+                result = result.rstrip('/') + '/' + part
+                
+        # Если путь пуст, возвращаем корневой путь
+        if not result:
+            return "/"
+            
+        # Убеждаемся, что путь начинается с /
+        if not result.startswith('/'):
+            result = '/' + result
+            
+        return result 
