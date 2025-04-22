@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import asyncio
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ContextTypes, ConversationHandler
 
@@ -103,36 +104,84 @@ async def handle_folder_selection(update: Update, context: ContextTypes.DEFAULT_
     folders = context.user_data.get("folders", [])
     current_path = context.user_data.get("current_path", "/")
     
+    # Добавляем логирование для отладки
+    logger.debug(f"Обработка выбора папки от пользователя {user_id}. Текст: '{user_text}', текущий путь: '{current_path}'")
+    
+    # Функция для повторных попыток отправки сообщения
+    async def send_message_with_retry(text, keyboard=None, retries=3):
+        for attempt in range(retries):
+            try:
+                if keyboard:
+                    return await update.message.reply_text(
+                        text,
+                        reply_markup=keyboard
+                    )
+                else:
+                    return await update.message.reply_text(
+                        text,
+                        reply_markup=ReplyKeyboardRemove()
+                    )
+            except Exception as e:
+                logger.warning(f"Ошибка при отправке сообщения (попытка {attempt+1}/{retries}): {str(e)}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(1.5)
+                else:
+                    logger.error(f"Не удалось отправить сообщение после {retries} попыток: {str(e)}", exc_info=True)
+                    return None
+    
     # Обработка специальных кнопок
     if user_text == "❌ Отмена":
         return await cancel(update, context)
     
+    if user_text == "⬆️ Вверх":
+        # Переходим на уровень выше
+        parent_path = folder_navigator.get_parent_path(current_path)
+        logger.debug(f"Переход на уровень выше из '{current_path}' в '{parent_path}'")
+        
+        # Проверяем на случай корневого пути
+        if parent_path == current_path and current_path != "/":
+            parent_path = "/"
+            logger.warning(f"Обнаружен потенциальный цикл в пути. Принудительно возвращаемся в корень.")
+        
+        try:
+            await folder_navigator.show_folders(update, context, parent_path)
+            return CHOOSE_FOLDER
+        except Exception as e:
+            logger.error(f"Ошибка при переходе на уровень выше: {str(e)}", exc_info=True)
+            await send_message_with_retry("Произошла ошибка при навигации. Возвращаемся к корневым папкам.")
+            await folder_navigator.show_folders(update, context, "/")
+            return CHOOSE_FOLDER
+    
     if user_text == "➕ Новая папка":
-        await update.message.reply_text(
-            "Введите название новой папки:",
-            reply_markup=ReplyKeyboardRemove()
+        await send_message_with_retry(
+            f"Введите название новой папки (текущий путь: {current_path}):"
         )
         # Сохраняем текущий путь для создания папки
         context.user_data["folder_to_create_path"] = current_path
+        logger.debug(f"Установлен путь для создания папки: '{current_path}'")
         state_manager.set_state(user_id, CREATE_FOLDER)
         return CREATE_FOLDER
     
     if user_text == "✅ Выбрать эту папку":
         # Проверяем, находится ли текущий путь в разрешенных папках
         if not folder_navigator.is_path_allowed(current_path) and current_path != "/":
-            await update.message.reply_text(
-                "Эта папка недоступна для выбора. Пожалуйста, выберите другую папку.",
-                reply_markup=ReplyKeyboardRemove()
+            await send_message_with_retry(
+                f"Эта папка недоступна для выбора: {current_path}. Пожалуйста, выберите другую папку."
             )
             await folder_navigator.show_folders(update, context)
             return CHOOSE_FOLDER
         
         # Выбор текущей папки для встречи
         folder_name = folder_navigator.get_folder_name(current_path)
-        await create_meeting(update, context, current_path, folder_name)
-        return ConversationHandler.END
+        try:
+            await create_meeting(update, context, current_path, folder_name)
+            return ConversationHandler.END
+        except Exception as e:
+            logger.error(f"Ошибка при создании встречи: {str(e)}", exc_info=True)
+            await send_message_with_retry(f"Произошла ошибка при создании встречи: {str(e)}. Пожалуйста, попробуйте снова.")
+            return CHOOSE_FOLDER
     
-    # Обработка выбора папки по названию (теперь все кнопки начинаются с эмодзи и имени папки)
+    # Обработка выбора папки по названию (все кнопки начинаются с эмодзи и имени папки)
     if user_text.startswith("📁 "):
         folder_name = user_text[2:].strip()  # Убираем эмодзи и пробел
         
@@ -148,14 +197,41 @@ async def handle_folder_selection(update: Update, context: ContextTypes.DEFAULT_
             # Получаем путь к выбранной папке
             folder_path = selected_folder.path if hasattr(selected_folder, 'path') else selected_folder.get('path', '/')
             
-            # Переходим в выбранную папку
-            await folder_navigator.show_folders(update, context, folder_path)
+            # Дополнительная проверка пути
+            if not folder_path:
+                logger.warning(f"Получен пустой путь для папки '{folder_name}'")
+                # Используем текущий путь и имя папки для формирования полного пути
+                folder_path = folder_navigator.safe_join_path_static(current_path, folder_name)
+                logger.debug(f"Сформирован путь на основе текущего: {folder_path}")
+            
+            # Нормализуем путь для предотвращения проблем с нотацией
+            folder_path = folder_navigator.normalize_path(folder_path)
+            logger.debug(f"Переход в папку: {folder_path}")
+            
+            try:
+                # Переходим в выбранную папку
+                await folder_navigator.show_folders(update, context, folder_path)
+                return CHOOSE_FOLDER
+            except Exception as e:
+                logger.error(f"Ошибка при переходе в папку '{folder_path}': {str(e)}", exc_info=True)
+                await send_message_with_retry(f"Произошла ошибка при переходе в папку. Возвращаемся к текущей папке.")
+                await folder_navigator.show_folders(update, context, current_path)
+                return CHOOSE_FOLDER
+        else:
+            logger.warning(f"Не найдена папка с именем '{folder_name}' в текущем списке папок на пути '{current_path}'")
+            await send_message_with_retry(
+                f"Не удалось найти папку '{folder_name}'. Попробуйте снова.",
+                ReplyKeyboardMarkup(
+                    folder_navigator.build_keyboard(folders),
+                    resize_keyboard=True
+                )
+            )
             return CHOOSE_FOLDER
     
     # Если пользователь ввел что-то другое, показываем текущие папки снова
-    await update.message.reply_text(
-        "Пожалуйста, выберите папку из клавиатуры или используйте кнопку отмены.",
-        reply_markup=ReplyKeyboardMarkup(
+    await send_message_with_retry(
+        f"Пожалуйста, выберите папку из клавиатуры или используйте кнопку отмены.\nТекущий путь: {current_path}",
+        ReplyKeyboardMarkup(
             folder_navigator.build_keyboard(folders),
             resize_keyboard=True
         )
@@ -178,25 +254,32 @@ async def create_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> s
         return CREATE_FOLDER
     
     # Создаем полный путь новой папки
-    new_folder_path = folder_navigator.safe_join_path(current_path, folder_name)
-    logger.info(f"Полный путь новой папки: '{new_folder_path}'")
-    
-    # Проверяем, находится ли путь в пределах разрешенных папок
-    is_allowed = folder_navigator.is_path_allowed(new_folder_path)
-    logger.info(f"Путь разрешен: {is_allowed}")
-    
-    if not is_allowed:
-        await update.message.reply_text(
-            "Нельзя создать папку в этом месте. Пожалуйста, выберите другую папку для создания."
-        )
-        # Возвращаемся к выбору папки
-        await folder_navigator.show_folders(update, context, current_path)
-        return CHOOSE_FOLDER
-    
     try:
+        new_folder_path = folder_navigator.safe_join_path_static(current_path, folder_name)
+        logger.info(f"Полный путь новой папки: '{new_folder_path}'")
+        
+        # Проверяем, находится ли путь в пределах разрешенных папок
+        is_allowed = folder_navigator.is_path_allowed(new_folder_path)
+        logger.info(f"Путь разрешен: {is_allowed}")
+        
+        if not is_allowed:
+            await update.message.reply_text(
+                f"Нельзя создать папку в этом месте. Текущий путь: {current_path}.\nПожалуйста, выберите другую папку для создания."
+            )
+            # Возвращаемся к выбору папки
+            await folder_navigator.show_folders(update, context, current_path)
+            return CHOOSE_FOLDER
+        
         # Проверяем существование родительского пути
         parent_exists = await folder_navigator.yadisk_helper.ensure_directory_exists_async(current_path)
         logger.info(f"Родительский путь '{current_path}' существует: {parent_exists}")
+        
+        if not parent_exists:
+            await update.message.reply_text(
+                f"Не удалось найти или создать родительскую папку '{current_path}'. Пожалуйста, попробуйте снова."
+            )
+            await folder_navigator.show_folders(update, context)
+            return CHOOSE_FOLDER
         
         # Создаем папку асинхронно
         logger.info(f"Создание папки на Яндекс.Диске: '{new_folder_path}'")
@@ -207,6 +290,7 @@ async def create_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> s
             
             # Обновляем кэш папок
             if current_path in folder_navigator.folder_cache:
+                logger.debug(f"Удаляем кэш для пути '{current_path}'")
                 del folder_navigator.folder_cache[current_path]
                 
             # Продолжаем навигацию, показывая содержимое текущей папки
@@ -214,9 +298,9 @@ async def create_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> s
             return CHOOSE_FOLDER
         else:
             raise Exception("Не удалось создать папку на Яндекс.Диске")
-        
+    
     except Exception as e:
-        logger.error(f"Ошибка при создании папки '{new_folder_path}': {e}", exc_info=True)
+        logger.error(f"Ошибка при создании папки '{folder_name}' в пути '{current_path}': {e}", exc_info=True)
         await update.message.reply_text(
             f"Не удалось создать папку: {str(e)}. Пожалуйста, попробуйте еще раз или используйте /cancel."
         )

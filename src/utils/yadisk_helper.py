@@ -5,6 +5,7 @@ import asyncio
 from functools import partial
 import yadisk
 from config.config import YANDEX_DISK_TOKEN, UPLOAD_DIR
+from typing import List, Any
 
 logger = logging.getLogger(__name__)
 
@@ -152,22 +153,48 @@ class YaDiskHelper:
             logger.error(f"Ошибка при получении списка папок из {path}: {e}", exc_info=True)
             raise
     
-    async def list_dirs_async(self, path="/", retry_count=3, retry_delay=2):
-        """Асинхронно возвращает список папок в указанном пути с повторными попытками при ошибке"""
-        loop = asyncio.get_event_loop()
+    async def list_dirs_async(self, path: str) -> List[Any]:
+        """
+        Асинхронная версия для получения списка папок
+        """
+        logger.debug(f"Запрос списка папок по пути: {path}")
         
-        for attempt in range(retry_count):
+        max_retries = 3
+        retry_delay = 1.5
+        
+        for attempt in range(max_retries):
             try:
-                # Выполняем list_dirs в отдельном потоке
-                list_dirs_func = partial(self.list_dirs, path)
-                return await loop.run_in_executor(None, list_dirs_func)
-            except Exception as e:
-                if attempt < retry_count - 1:
-                    logger.warning(f"Попытка {attempt+1}/{retry_count} получения списка папок для {path} не удалась: {e}")
+                # Преобразуем синхронный вызов в асинхронный
+                loop = asyncio.get_event_loop()
+                
+                # Используем ThreadPoolExecutor для запуска блокирующего вызова API в отдельном потоке
+                result = await loop.run_in_executor(
+                    None, 
+                    partial(self._list_dirs_sync, path)
+                )
+                
+                logger.debug(f"Получено {len(result)} папок по пути: {path}")
+                return result
+                
+            except yadisk.exceptions.ConnectionError as e:
+                logger.warning(f"Ошибка соединения при получении списка папок (попытка {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
                 else:
-                    logger.error(f"Не удалось получить список папок после {retry_count} попыток: {e}", exc_info=True)
+                    logger.error(f"Не удалось получить список папок после {max_retries} попыток: {e}", exc_info=True)
                     raise
+                    
+            except yadisk.exceptions.TimeoutError as e:
+                logger.warning(f"Таймаут при получении списка папок (попытка {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                else:
+                    logger.error(f"Таймаут при получении списка папок после {max_retries} попыток: {e}", exc_info=True)
+                    raise
+                    
+            except Exception as e:
+                logger.error(f"Неожиданная ошибка при получении списка папок: {e}", exc_info=True)
+                raise
     
     def create_dir(self, path):
         """Создает директорию на Яндекс.Диске"""
@@ -180,8 +207,11 @@ class YaDiskHelper:
                 return True
             except yadisk.exceptions.PathNotFoundError:
                 # Если директория не существует, убеждаемся, что родительские директории существуют
+                parent_dir = os.path.dirname(path)
+                logger.info(f"Директория {path} не существует. Проверяем родительскую директорию: {parent_dir}")
                 self._ensure_directory_exists(os.path.dirname(path))
                 # Создаем директорию
+                logger.info(f"Создаем новую директорию: {path}")
                 self.disk.mkdir(path)
                 logger.info(f"Директория {path} успешно создана")
                 return True
@@ -192,8 +222,42 @@ class YaDiskHelper:
     async def create_dir_async(self, path):
         """Асинхронно создает директорию на Яндекс.Диске"""
         logger.info(f"Асинхронное создание директории: {path}")
-        loop = asyncio.get_event_loop()
-        create_dir_func = partial(self.create_dir, path)
-        result = await loop.run_in_executor(None, create_dir_func)
-        logger.info(f"Результат создания директории {path}: {result}")
-        return result 
+        try:
+            loop = asyncio.get_event_loop()
+            create_dir_func = partial(self.create_dir, path)
+            result = await loop.run_in_executor(None, create_dir_func)
+            logger.info(f"Результат создания директории {path}: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Исключение при асинхронном создании директории {path}: {e}", exc_info=True)
+            return False
+    
+    def _list_dirs_sync(self, path: str) -> List[Any]:
+        """
+        Синхронная версия для получения списка папок
+        
+        Args:
+            path: Путь на Яндекс.Диске
+            
+        Returns:
+            Список объектов папок
+        """
+        try:
+            # Проверяем, что путь существует
+            if not self.disk.exists(path):
+                logger.warning(f"Путь {path} не существует на Яндекс.Диске")
+                return []
+            
+            # Получаем список объектов в директории
+            items = list(self.disk.listdir(path))
+            
+            # Фильтруем только папки
+            folders = [item for item in items if item.type == "dir"]
+            
+            return folders
+        except yadisk.exceptions.PathNotFoundError:
+            logger.warning(f"Путь {path} не найден на Яндекс.Диске")
+            return []
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка папок для {path}: {e}", exc_info=True)
+            raise 

@@ -92,7 +92,7 @@ class FolderNavigator:
     def join_paths(self, parent_path: str, folder_name: str) -> str:
         """Соединяет родительский путь и имя папки в полный путь"""
         # Используем более надежный метод для объединения путей
-        return self.safe_join_path(parent_path, folder_name)
+        return self.safe_join_path_static(parent_path, folder_name)
     
     async def get_folders(self, path: str, retry_count: int = 2, retry_delay: float = 1.0) -> List[Any]:
         """Получает список папок по указанному пути, с использованием кэша"""
@@ -204,6 +204,11 @@ class FolderNavigator:
         if include_current_folder and self.add_current_folder_button:
             special_buttons.append("✅ Выбрать эту папку")
         
+        # Добавляем кнопку для перехода вверх (кроме корневого пути)
+        current_path = getattr(self, 'current_path', None)
+        if current_path and current_path != "/":
+            special_buttons.append("⬆️ Вверх")
+        
         if self.create_folder_button:
             special_buttons.append("➕ Новая папка")
         
@@ -254,6 +259,37 @@ class FolderNavigator:
     ) -> None:
         """Отображает список папок по указанному пути"""
         normalized_path = self.normalize_path(path)
+        logger.debug(f"Отображение папок для пути: '{path}' -> нормализован в: '{normalized_path}'")
+        
+        # Сохраняем текущий путь для использования в build_keyboard
+        self.current_path = normalized_path
+        
+        # Максимальное количество попыток отправки сообщения
+        max_retries = 3
+        retry_delay = 1.5  # секунды
+        
+        # Функция для повторных попыток отправки сообщения
+        async def send_message_with_retry(text, keyboard=None, retries=max_retries):
+            for attempt in range(retries):
+                try:
+                    if keyboard:
+                        await update.message.reply_text(
+                            text,
+                            reply_markup=keyboard
+                        )
+                    else:
+                        await update.message.reply_text(
+                            text,
+                            reply_markup=ReplyKeyboardRemove()
+                        )
+                    return True
+                except Exception as e:
+                    logger.warning(f"Ошибка при отправке сообщения (попытка {attempt+1}/{retries}): {str(e)}")
+                    if attempt < retries - 1:
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error(f"Не удалось отправить сообщение после {retries} попыток: {str(e)}", exc_info=True)
+                        return False
         
         # Если путь корневой, проверяем есть ли разрешенные папки
         if normalized_path == "/" and self.allowed_folders:
@@ -269,23 +305,19 @@ class FolderNavigator:
             # Сохраняем список папок и путь в контексте
             context.user_data["folders"] = allowed_folders_display
             context.user_data["current_path"] = normalized_path
+            logger.debug(f"Сохранен список из {len(allowed_folders_display)} разрешенных папок и текущий путь: '{normalized_path}'")
             
             # Отправляем сообщение с папками
-            await update.message.reply_text(
-                message,
-                reply_markup=ReplyKeyboardMarkup(
-                    self.build_keyboard(allowed_folders_display),
-                    resize_keyboard=True
-                )
+            keyboard = ReplyKeyboardMarkup(
+                self.build_keyboard(allowed_folders_display),
+                resize_keyboard=True
             )
+            await send_message_with_retry(message, keyboard)
             return
         
         # Проверяем, разрешен ли выбранный путь
         if not self.is_path_allowed(normalized_path) and normalized_path != "/":
-            await update.message.reply_text(
-                "⛔ Папка недоступна",
-                reply_markup=ReplyKeyboardRemove()
-            )
+            await send_message_with_retry(f"⛔ Папка недоступна: {normalized_path}")
             
             # Показываем доступные папки
             await self.show_folders(update, context)
@@ -296,40 +328,78 @@ class FolderNavigator:
             folders = await self.get_folders(normalized_path)
             
             if not folders:
-                await update.message.reply_text(
-                    "📂 Папка пуста",
-                    reply_markup=ReplyKeyboardRemove()
+                folder_name = self.get_folder_name(normalized_path)
+                
+                # Показываем сообщение, что папка пуста, но продолжаем показывать
+                # клавиатуру, чтобы пользователь мог выбрать эту папку
+                await send_message_with_retry(f"📂 Папка '{folder_name}' пуста, но вы можете выбрать её")
+                
+                # Сохраняем пустой список папок и путь в контексте
+                context.user_data["folders"] = []
+                context.user_data["current_path"] = normalized_path
+                logger.debug(f"Сохранен пустой список папок и текущий путь: '{normalized_path}'")
+                
+                # Создаем клавиатуру только со специальными кнопками (без папок)
+                keyboard = ReplyKeyboardMarkup(
+                    self.build_keyboard([], include_current_folder=True),
+                    resize_keyboard=True
                 )
-                if normalized_path != "/":
-                    # Показываем доступные папки
-                    await self.show_folders(update, context)
+                
+                # Отправляем сообщение с клавиатурой
+                await update.message.reply_text(
+                    f"Текущий путь: {normalized_path}",
+                    reply_markup=keyboard
+                )
+                
                 return
             
-            # Формируем краткое сообщение
+            # Формируем краткое сообщение с информацией о текущем пути
             if path == "/":
                 message = self.title
             else:
-                folder_name = self.get_folder_name(normalized_path)
-                message = f"📂 {folder_name}"
+                # Получаем все части пути для показа полной иерархии
+                parts = normalized_path.split("/")
+                parts = [p for p in parts if p]  # Удаляем пустые элементы
+                
+                if len(parts) <= 1:
+                    folder_name = parts[0] if parts else ""
+                    message = f"📂 {folder_name}"
+                else:
+                    # Формируем путь с учетом глубины вложенности
+                    last_folder = parts[-1]
+                    # Показываем путь в компактной форме для удобства
+                    if len(parts) <= 3:
+                        path_display = "/".join(parts)
+                    else:
+                        # Для глубоких путей показываем первый элемент и последние 2
+                        path_display = f"{parts[0]}/../{parts[-2]}/{parts[-1]}"
+                    
+                    message = f"📂 {path_display}"
             
             # Сохраняем список папок и путь в контексте
             context.user_data["folders"] = folders
             context.user_data["current_path"] = normalized_path
+            logger.debug(f"Сохранен список из {len(folders)} папок и текущий путь: '{normalized_path}'")
             
             # Отправляем сообщение с папками
-            await update.message.reply_text(
-                message,
-                reply_markup=ReplyKeyboardMarkup(
-                    self.build_keyboard(folders),
-                    resize_keyboard=True
-                )
+            keyboard = ReplyKeyboardMarkup(
+                self.build_keyboard(folders),
+                resize_keyboard=True
             )
+            await send_message_with_retry(message, keyboard)
+            
         except Exception as e:
             logger.error(f"Ошибка при отображении папок для {normalized_path}: {str(e)}", exc_info=True)
-            await update.message.reply_text(
-                "🚫 Ошибка соединения",
-                reply_markup=ReplyKeyboardRemove()
-            )
+            await send_message_with_retry(f"🚫 Ошибка при работе с папкой: {str(e)}")
+            
+            # В случае ошибки пробуем вернуться на верхний уровень
+            if normalized_path != "/":
+                try:
+                    parent_path = self.get_parent_path(normalized_path)
+                    await asyncio.sleep(1)  # Добавляем задержку для избежания слишком частых запросов
+                    await self.show_folders(update, context, parent_path)
+                except Exception as parent_error:
+                    logger.error(f"Не удалось перейти на родительский путь: {str(parent_error)}", exc_info=True)
     
     def reload_allowed_folders(self) -> None:
         """Перезагружает список разрешенных папок из файла"""
@@ -368,6 +438,7 @@ class FolderNavigator:
         Возвращает кортеж: (валидность, сообщение об ошибке, существует ли путь)
         """
         normalized_path = self.normalize_path(path)
+        logger.debug(f"Проверка валидности пути: '{path}' -> нормализован в: '{normalized_path}'")
         
         # Проверка длины пути
         if len(normalized_path) > 255:
@@ -545,20 +616,44 @@ class FolderNavigator:
         Returns:
             Объединенный путь
         """
+        # Дополнительное логирование для отладки
+        logger.debug(f"safe_join_path_static вызван с параметрами: {parts}")
+        
         # Убираем пустые части пути
-        filtered_parts = [p for p in parts if p]
+        filtered_parts = [str(p).strip() for p in parts if p]
         
         if not filtered_parts:
             return "/"
         
-        # Собираем путь
+        # Обрабатываем пути, которые могут быть полными или относительными
         result = ""
-        for part in filtered_parts:
-            part = str(part).strip().strip('/')  # Убираем начальные и конечные слеши
-            if part:
-                result = result.rstrip('/') + '/' + part
-                
-        # Если путь пуст, возвращаем корневой путь
+        first_part = filtered_parts[0]
+        
+        # Проверяем, начинается ли первая часть с корневого пути
+        if first_part.startswith('/'):
+            # Первая часть уже содержит корневой путь
+            result = first_part
+            start_index = 1
+        else:
+            # Если первая часть не начинается с /, то начинаем с корневого пути
+            result = "/"
+            start_index = 0
+        
+        # Обрабатываем остальные части пути
+        for i in range(start_index, len(filtered_parts)):
+            part = filtered_parts[i]
+            # Удаляем начальные и конечные слеши
+            clean_part = part.strip('/')
+            
+            if clean_part:
+                # Если текущий результат заканчивается на слеш, просто добавляем часть
+                if result.endswith('/'):
+                    result += clean_part
+                else:
+                    # Иначе добавляем слеш и часть
+                    result += '/' + clean_part
+        
+        # Обрабатываем случай, когда результат пуст (были только пустые части)
         if not result:
             return "/"
             
@@ -566,4 +661,9 @@ class FolderNavigator:
         if not result.startswith('/'):
             result = '/' + result
             
+        # Удаляем двойные слеши
+        while '//' in result:
+            result = result.replace('//', '/')
+            
+        logger.debug(f"safe_join_path_static вернул результат: {result}")
         return result 
