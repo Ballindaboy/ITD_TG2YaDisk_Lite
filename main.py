@@ -150,23 +150,17 @@ async def start_caching(folder_navigator):
 def main():
     """Запускает бота"""
     try:
-        # Получаем и запускаем приложение
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        application = loop.run_until_complete(setup_application())
+        # Создаем и настраиваем приложение
+        application = asyncio.run(setup_application())
         logger.info("Бот запущен")
         
-        # Запускаем бота
-        loop.run_until_complete(application.run_polling(allowed_updates=Update.ALL_TYPES))
+        # Запускаем бота (не как корутину)
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
     except Exception as e:
         logger.critical(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
         raise
-    finally:
-        if 'loop' in locals() and loop.is_running():
-            loop.close()
 
 if __name__ == "__main__":
     main() 

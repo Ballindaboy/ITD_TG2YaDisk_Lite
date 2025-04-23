@@ -165,7 +165,11 @@ class YaDiskHelper:
         for attempt in range(max_retries):
             try:
                 # Преобразуем синхронный вызов в асинхронный
-                loop = asyncio.get_event_loop()
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
                 
                 # Используем ThreadPoolExecutor для запуска блокирующего вызова API в отдельном потоке
                 result = await loop.run_in_executor(
@@ -176,25 +180,18 @@ class YaDiskHelper:
                 logger.debug(f"Получено {len(result)} папок по пути: {path}")
                 return result
                 
-            except yadisk.exceptions.ConnectionError as e:
-                logger.warning(f"Ошибка соединения при получении списка папок (попытка {attempt+1}/{max_retries}): {e}")
+            except Exception as e:
+                logger.warning(f"Ошибка при получении списка папок (попытка {attempt+1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
+                    try:
+                        await asyncio.sleep(retry_delay)
+                    except RuntimeError:
+                        # Обработка случая, когда нет работающего event loop
+                        import time
+                        time.sleep(retry_delay)
                 else:
                     logger.error(f"Не удалось получить список папок после {max_retries} попыток: {e}", exc_info=True)
-                    raise
-                    
-            except yadisk.exceptions.TimeoutError as e:
-                logger.warning(f"Таймаут при получении списка папок (попытка {attempt+1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                else:
-                    logger.error(f"Таймаут при получении списка папок после {max_retries} попыток: {e}", exc_info=True)
-                    raise
-                    
-            except Exception as e:
-                logger.error(f"Неожиданная ошибка при получении списка папок: {e}", exc_info=True)
-                raise
+                    return []
     
     def create_dir(self, path):
         """Создает директорию на Яндекс.Диске"""
