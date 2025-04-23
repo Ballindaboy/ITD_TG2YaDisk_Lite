@@ -150,8 +150,12 @@ async def start_caching(folder_navigator):
 def main():
     """Запускает бота"""
     try:
+        # Создаем новый event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         # Создаем и настраиваем приложение
-        application = asyncio.run(setup_application())
+        application = loop.run_until_complete(setup_application())
         logger.info("Бот запущен")
         
         # Запускаем бота (не как корутину)
